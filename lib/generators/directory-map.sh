@@ -13,8 +13,6 @@ generate_directory_map() {
     log_info "Generating directory map..."
     ensure_dir "$(dirname "$output_file")"
 
-    local structure_json="$tmp_dir/structure.json"
-
     local header
     header=$(write_generated_header \
         "Directory Map" \
@@ -75,7 +73,7 @@ generate_directory_map() {
                 local subname
                 subname=$(basename "$sub")
                 case "$subname" in
-                    .*|node_modules|__pycache__|.git) continue ;;
+                    .git|node_modules|__pycache__|.*) continue ;;
                 esac
                 sub_count=$((sub_count + 1))
                 [ "$sub_count" -gt 10 ] && break

@@ -178,7 +178,7 @@ Score the response using the rubric in the task above. Return ONLY a JSON object
 
     JUDGE_RESPONSE_FILE=$(mktemp "${TMPDIR:-/tmp}/benchmark-judge.XXXXXX.json")
 
-    CLAUDECODE= claude \
+    CLAUDECODE='' claude \
         --output-format json \
         --model "$MODEL" \
         --dangerously-skip-permissions \
@@ -276,7 +276,7 @@ log_info "Model: $MODEL | Budget cap: \$$MAX_BUDGET"
 
 RESPONSE_FILE=$(mktemp "${TMPDIR:-/tmp}/benchmark-response.XXXXXX.json")
 
-CLAUDECODE= claude \
+CLAUDECODE='' claude \
     --output-format json \
     --model "$MODEL" \
     --dangerously-skip-permissions \

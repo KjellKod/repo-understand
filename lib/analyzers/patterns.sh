@@ -22,7 +22,6 @@ analyze_patterns() {
     local has_seeds="false"
     local has_config="false"
     local has_tests="false"
-    local has_api_dir="false"
     local has_graphql="false"
 
     # Search recursively but not too deep
@@ -45,7 +44,6 @@ analyze_patterns() {
     _find_dir "tests" && has_tests="true"
     _find_dir "__tests__" && has_tests="true"
     _find_dir "spec" && has_tests="true"
-    _find_dir "api" && has_api_dir="true"
     _find_dir "graphql" && has_graphql="true"
 
     # Determine API style
