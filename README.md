@@ -157,20 +157,24 @@ major refactors, tech stack changes).
 > tasks, interpreting results, and where all artifacts end up.
 
 The `benchmark/` directory measures whether the generated docs actually reduce
-token usage and improve accuracy when agents work on a repo. Quick start:
+time, tokens, and errors when agents work on a repo. Agents run in **full
+agent mode** with file access — not single-turn prompts.
 
 ```bash
 BENCHMARK_DIR=/path/to/repo-understand/benchmark
 
-# Run WITHOUT scaffolding (baseline)
+# Run WITHOUT scaffolding (agent explores from scratch)
 $BENCHMARK_DIR/benchmark.sh /path/to/target/repo $BENCHMARK_DIR/tasks/explain-architecture.md --without-scaffolding
 
-# Run WITH scaffolding (agent gets generated docs as context)
+# Run WITH scaffolding (generated docs are in the repo for the agent to find)
 $BENCHMARK_DIR/benchmark.sh /path/to/target/repo $BENCHMARK_DIR/tasks/explain-architecture.md --with-scaffolding
 
-# Compare the results
+# Judge accuracy (automated, uses a separate agent pass)
+$BENCHMARK_DIR/benchmark.sh /path/to/target/repo $BENCHMARK_DIR/tasks/explain-architecture.md --judge benchmark/results/<result>.json
+
+# Generate comparison report
 $BENCHMARK_DIR/report.sh
 ```
 
 See the [walkthrough](BENCHMARK_WALKTHROUGH.md) for the full guide including
-how to write domain-specific tasks for your repo and how to interpret results.
+how to write domain-specific tasks, use answer keys, and interpret results.

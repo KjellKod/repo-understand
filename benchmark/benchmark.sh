@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
 # Benchmark harness for repo-understand
-# Measures token usage for tasks with and without generated scaffolding
+# Measures time, tokens, and accuracy for agent tasks with/without scaffolding
 #
 # Usage: benchmark.sh <repo-path> <task-file> [--with-scaffolding | --without-scaffolding]
+#        benchmark.sh <repo-path> <task-file> --judge <result-file> [--answer-key <file>]
 #
-# Bash 3.2 compatible. Requires: jq, and either `claude` CLI or ANTHROPIC_API_KEY
+# Bash 3.2 compatible. Requires: jq, claude CLI
+#
+# How it works:
+#   --without-scaffolding: Runs claude as an agent with file access on the repo.
+#     No generated docs -- the agent must explore the codebase from scratch.
+#
+#   --with-scaffolding: First generates scaffolding docs into the repo, then
+#     runs claude as an agent with file access. The agent can read the generated
+#     docs as part of its exploration. Scaffolding is cleaned up after the run.
+#
+#   --judge: Runs a separate claude pass to score a previous result for accuracy
+#     against the task rubric (and optional answer key).
 
 set -eo pipefail
 
@@ -14,21 +26,44 @@ REPO_UNDERSTAND_DIR="$(dirname "$SCRIPT_DIR")"
 # Source utilities
 . "$REPO_UNDERSTAND_DIR/lib/util.sh"
 
+# ─── Helpers ─────────────────────────────────────────────────────────────────────
+
+_cleanup_scaffolding() {
+    local repo="$1"
+    rm -f "$repo/docs/architecture/overview.md"
+    rm -f "$repo/docs/architecture/tech-stack.md"
+    rm -f "$repo/docs/architecture/directory-map.md"
+    rm -f "$repo/agents-content.md"
+    rm -f "$repo/doc-structure.md"
+    rm -f "$repo/repo-understand.manifest.json"
+    # Remove dirs only if empty
+    rmdir "$repo/docs/architecture" 2>/dev/null || true
+    rmdir "$repo/docs" 2>/dev/null || true
+}
+
 # ─── Argument parsing ───────────────────────────────────────────────────────────
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") <repo-path> <task-file> [--with-scaffolding | --without-scaffolding]
+Usage: $(basename "$0") <repo-path> <task-file> [options]
 
-Benchmark AI agent performance on a task with or without repo-understand scaffolding.
+Benchmark AI agent performance on a task with or without scaffolding.
+
+Modes:
+  --with-scaffolding     Run agent with generated scaffolding (default)
+  --without-scaffolding  Run agent without scaffolding (baseline)
+  --judge <result-file>  Score a previous result for accuracy
 
 Arguments:
   <repo-path>            Path to the repository to analyze
   <task-file>            Path to the benchmark task markdown file
-  --with-scaffolding     Run with generated scaffolding (default)
-  --without-scaffolding  Run without scaffolding (baseline)
 
-Requires: jq, and either 'claude' CLI or ANTHROPIC_API_KEY environment variable.
+Options:
+  --answer-key <file>    Answer key for judge scoring (optional)
+  --model <model>        Model to use (default: sonnet)
+  --max-budget <usd>     Max spend per run in USD (default: 0.50)
+
+Requires: jq, claude CLI
 EOF
     exit 1
 }
@@ -36,11 +71,37 @@ EOF
 REPO_PATH=""
 TASK_FILE=""
 CONDITION="with"
+MODE="benchmark"
+JUDGE_RESULT_FILE=""
+ANSWER_KEY_FILE=""
+MODEL="sonnet"
+MAX_BUDGET="0.50"
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --with-scaffolding) CONDITION="with" ;;
         --without-scaffolding) CONDITION="without" ;;
+        --judge)
+            MODE="judge"
+            shift
+            [ $# -eq 0 ] && { log_error "--judge requires a result file"; usage; }
+            JUDGE_RESULT_FILE="$1"
+            ;;
+        --answer-key)
+            shift
+            [ $# -eq 0 ] && { log_error "--answer-key requires a file"; usage; }
+            ANSWER_KEY_FILE="$1"
+            ;;
+        --model)
+            shift
+            [ $# -eq 0 ] && { log_error "--model requires a value"; usage; }
+            MODEL="$1"
+            ;;
+        --max-budget)
+            shift
+            [ $# -eq 0 ] && { log_error "--max-budget requires a value"; usage; }
+            MAX_BUDGET="$1"
+            ;;
         --help|-h) usage ;;
         -*)
             log_error "Unknown option: $1"
@@ -67,24 +128,9 @@ done
 REPO_PATH="$(cd "$REPO_PATH" 2>/dev/null && pwd)" || { log_error "Invalid repo path"; exit 1; }
 [ -f "$TASK_FILE" ] || { log_error "Task file not found: $TASK_FILE"; exit 1; }
 
-# Check for jq
+# Check dependencies
 require_command "jq" "brew install jq"
-
-# ─── Determine API mode ─────────────────────────────────────────────────────────
-
-API_MODE=""
-if command -v claude >/dev/null 2>&1; then
-    API_MODE="cli"
-    log_info "Using claude CLI for benchmarking"
-elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    API_MODE="api"
-    log_info "Using Anthropic HTTP API for benchmarking"
-else
-    log_error "Neither 'claude' CLI nor ANTHROPIC_API_KEY found."
-    log_error "Install claude CLI: npm install -g @anthropic-ai/claude-cli"
-    log_error "Or set ANTHROPIC_API_KEY environment variable."
-    exit 1
-fi
+require_command "claude" "See https://docs.anthropic.com/en/docs/claude-code"
 
 # ─── Setup ───────────────────────────────────────────────────────────────────────
 
@@ -93,45 +139,132 @@ RESULTS_DIR="$SCRIPT_DIR/results"
 ensure_dir "$RESULTS_DIR"
 
 TASK_CONTENT=$(cat "$TASK_FILE")
-SCAFFOLD_CONTEXT=""
 
-if [ "$CONDITION" = "with" ]; then
-    log_info "Running with scaffolding..."
+# ─── Judge mode ──────────────────────────────────────────────────────────────────
 
-    # Generate scaffolding first
-    SCAFFOLD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/benchmark-scaffold.XXXXXX")
-    trap 'rm -rf "$SCAFFOLD_DIR"' EXIT
+if [ "$MODE" = "judge" ]; then
+    [ -f "$JUDGE_RESULT_FILE" ] || { log_error "Result file not found: $JUDGE_RESULT_FILE"; exit 1; }
 
-    bash "$REPO_UNDERSTAND_DIR/repo-understand.sh" "$REPO_PATH" --output "$SCAFFOLD_DIR" 2>/dev/null
+    AGENT_RESPONSE=$(jq -r '.response' "$JUDGE_RESULT_FILE")
+    RESULT_TASK=$(jq -r '.task' "$JUDGE_RESULT_FILE")
+    RESULT_CONDITION=$(jq -r '.condition' "$JUDGE_RESULT_FILE")
 
-    # Load scaffolding as context
-    for artifact in \
-        "docs/architecture/overview.md" \
-        "docs/architecture/tech-stack.md" \
-        "docs/architecture/directory-map.md" \
-        "agents-content.md" \
-        "doc-structure.md"; do
-        if [ -f "$SCAFFOLD_DIR/$artifact" ]; then
-            SCAFFOLD_CONTEXT="${SCAFFOLD_CONTEXT}
+    ANSWER_KEY_SECTION=""
+    if [ -n "$ANSWER_KEY_FILE" ] && [ -f "$ANSWER_KEY_FILE" ]; then
+        ANSWER_KEY_SECTION="
+--- ANSWER KEY (ground truth) ---
+$(cat "$ANSWER_KEY_FILE")
+"
+    fi
 
---- $artifact ---
-$(cat "$SCAFFOLD_DIR/$artifact")"
-        fi
-    done
-else
-    log_info "Running without scaffolding (baseline)..."
-fi
-
-# ─── Build prompt ────────────────────────────────────────────────────────────────
-
-PROMPT="You are analyzing the repository at: $REPO_PATH
-
-${SCAFFOLD_CONTEXT}
+    JUDGE_PROMPT="You are a benchmark judge. Score the following agent response for accuracy and completeness.
 
 --- TASK ---
 ${TASK_CONTENT}
+${ANSWER_KEY_SECTION}
+--- AGENT RESPONSE ---
+${AGENT_RESPONSE}
 
-Please provide a thorough answer to the task above."
+--- INSTRUCTIONS ---
+Score the response using the rubric in the task above. Return ONLY a JSON object:
+{
+  \"accuracy\": <1-5>,
+  \"completeness\": <1-5>,
+  \"hallucination_count\": <number of fabricated claims>,
+  \"reasoning\": \"<brief explanation of scores>\"
+}"
+
+    log_info "Judging result: $RESULT_TASK ($RESULT_CONDITION)"
+
+    JUDGE_RESPONSE_FILE=$(mktemp "${TMPDIR:-/tmp}/benchmark-judge.XXXXXX.json")
+
+    CLAUDECODE= claude \
+        --output-format json \
+        --model "$MODEL" \
+        --dangerously-skip-permissions \
+        --no-session-persistence \
+        -p "$JUDGE_PROMPT" > "$JUDGE_RESPONSE_FILE" 2>/dev/null || {
+        log_error "Judge pass failed."
+        rm -f "$JUDGE_RESPONSE_FILE"
+        exit 1
+    }
+
+    JUDGE_TEXT=$(jq -r '.result // .content // ""' "$JUDGE_RESPONSE_FILE")
+    rm -f "$JUDGE_RESPONSE_FILE"
+
+    # Extract JSON from judge response (may be wrapped in markdown)
+    JUDGE_JSON=$(echo "$JUDGE_TEXT" | sed -n '/^{/,/^}/p' | head -20)
+    if [ -z "$JUDGE_JSON" ]; then
+        # Try extracting from code block
+        JUDGE_JSON=$(echo "$JUDGE_TEXT" | sed -n '/```json/,/```/p' | sed '1d;$d')
+    fi
+
+    if [ -n "$JUDGE_JSON" ]; then
+        ACCURACY=$(echo "$JUDGE_JSON" | jq -r '.accuracy // 0')
+        COMPLETENESS=$(echo "$JUDGE_JSON" | jq -r '.completeness // 0')
+        HALLUCINATIONS=$(echo "$JUDGE_JSON" | jq -r '.hallucination_count // 0')
+        REASONING=$(echo "$JUDGE_JSON" | jq -r '.reasoning // ""')
+
+        # Update the result file with judge scores
+        UPDATED=$(jq \
+            --argjson accuracy "$ACCURACY" \
+            --argjson completeness "$COMPLETENESS" \
+            --argjson hallucinations "$HALLUCINATIONS" \
+            --arg reasoning "$REASONING" \
+            '. + {accuracy: $accuracy, completeness: $completeness, hallucination_count: $hallucinations, judge_reasoning: $reasoning}' \
+            "$JUDGE_RESULT_FILE")
+        echo "$UPDATED" > "$JUDGE_RESULT_FILE"
+
+        log_success "Judge scores added to result file"
+        echo ""
+        echo "  Accuracy:       $ACCURACY/5"
+        echo "  Completeness:   $COMPLETENESS/5"
+        echo "  Hallucinations: $HALLUCINATIONS"
+        echo "  Reasoning:      $REASONING"
+    else
+        log_error "Could not parse judge response"
+        echo "$JUDGE_TEXT"
+    fi
+
+    exit 0
+fi
+
+# ─── Benchmark mode ──────────────────────────────────────────────────────────────
+
+SCAFFOLD_HINT=""
+CLEANUP_SCAFFOLD="false"
+
+if [ "$CONDITION" = "with" ]; then
+    log_info "Generating scaffolding..."
+
+    # Generate scaffolding into the repo so the agent discovers it naturally
+    if [ ! -f "$REPO_PATH/repo-understand.manifest.json" ]; then
+        bash "$REPO_UNDERSTAND_DIR/repo-understand.sh" "$REPO_PATH" 2>/dev/null
+        CLEANUP_SCAFFOLD="true"
+    else
+        log_info "Scaffolding already exists in repo, using existing"
+    fi
+
+    SCAFFOLD_HINT="
+
+This repository has pre-generated documentation to help you understand it.
+Start by reading these files before exploring the codebase:
+- docs/architecture/overview.md
+- docs/architecture/tech-stack.md
+- docs/architecture/directory-map.md
+- agents-content.md
+- doc-structure.md
+"
+fi
+
+# Build the agent prompt
+AGENT_PROMPT="You are analyzing the repository at: $REPO_PATH
+${SCAFFOLD_HINT}
+--- TASK ---
+${TASK_CONTENT}
+
+Explore the repository using your tools (Read, Glob, Grep) to answer the task
+thoroughly. Provide a complete, well-structured answer."
 
 # ─── Execute ─────────────────────────────────────────────────────────────────────
 
@@ -139,74 +272,66 @@ START_TIME=$(date +%s)
 RESULT_FILE="$RESULTS_DIR/$(date +%Y%m%d_%H%M%S)_${TASK_NAME}_${CONDITION}.json"
 
 log_info "Executing benchmark: $TASK_NAME ($CONDITION scaffolding)"
+log_info "Model: $MODEL | Budget cap: \$$MAX_BUDGET"
 
-if [ "$API_MODE" = "cli" ]; then
-    # Use claude CLI with JSON output
-    RESPONSE_FILE=$(mktemp "${TMPDIR:-/tmp}/benchmark-response.XXXXXX.json")
+RESPONSE_FILE=$(mktemp "${TMPDIR:-/tmp}/benchmark-response.XXXXXX.json")
 
-    claude --output-format json -p "$PROMPT" > "$RESPONSE_FILE" 2>/dev/null || {
-        log_error "Claude CLI failed. Check that you are authenticated."
-        exit 1
-    }
-
-    INPUT_TOKENS=$(jq -r '.usage.input_tokens // 0' "$RESPONSE_FILE")
-    OUTPUT_TOKENS=$(jq -r '.usage.output_tokens // 0' "$RESPONSE_FILE")
-    RESPONSE_TEXT=$(jq -r '.result // .content // "no response"' "$RESPONSE_FILE")
+CLAUDECODE= claude \
+    --output-format json \
+    --model "$MODEL" \
+    --dangerously-skip-permissions \
+    --no-session-persistence \
+    --max-budget-usd "$MAX_BUDGET" \
+    --add-dir "$REPO_PATH" \
+    --allowedTools "Read Glob Grep" \
+    -p "$AGENT_PROMPT" > "$RESPONSE_FILE" 2>/dev/null || {
+    log_error "Claude agent run failed."
     rm -f "$RESPONSE_FILE"
-
-elif [ "$API_MODE" = "api" ]; then
-    # Use Anthropic HTTP API
-    RESPONSE_FILE=$(mktemp "${TMPDIR:-/tmp}/benchmark-response.XXXXXX.json")
-
-    # Escape the prompt for JSON
-    ESCAPED_PROMPT=$(echo "$PROMPT" | jq -Rs .)
-
-    curl -s -X POST "https://api.anthropic.com/v1/messages" \
-        -H "Content-Type: application/json" \
-        -H "x-api-key: $ANTHROPIC_API_KEY" \
-        -H "anthropic-version: 2023-06-01" \
-        -d "{
-            \"model\": \"claude-sonnet-4-20250514\",
-            \"max_tokens\": 4096,
-            \"temperature\": 0,
-            \"messages\": [{\"role\": \"user\", \"content\": $ESCAPED_PROMPT}]
-        }" > "$RESPONSE_FILE" 2>/dev/null || {
-        log_error "API call failed."
-        exit 1
-    }
-
-    INPUT_TOKENS=$(jq -r '.usage.input_tokens // 0' "$RESPONSE_FILE")
-    OUTPUT_TOKENS=$(jq -r '.usage.output_tokens // 0' "$RESPONSE_FILE")
-    RESPONSE_TEXT=$(jq -r '.content[0].text // "no response"' "$RESPONSE_FILE")
-    rm -f "$RESPONSE_FILE"
-fi
+    if [ "$CLEANUP_SCAFFOLD" = "true" ]; then
+        _cleanup_scaffolding "$REPO_PATH"
+    fi
+    exit 1
+}
 
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 
-# ─── Save results ────────────────────────────────────────────────────────────────
+# Extract metrics from response
+INPUT_TOKENS=$(jq -r '.usage.input_tokens // 0' "$RESPONSE_FILE")
+OUTPUT_TOKENS=$(jq -r '.usage.output_tokens // 0' "$RESPONSE_FILE")
+RESPONSE_TEXT=$(jq -r '.result // .content // "no response"' "$RESPONSE_FILE")
+NUM_TURNS=$(jq -r '.num_turns // 0' "$RESPONSE_FILE")
+rm -f "$RESPONSE_FILE"
 
-# Escape response text for JSON
-ESCAPED_RESPONSE=$(echo "$RESPONSE_TEXT" | jq -Rs .)
+# Clean up scaffolding if we generated it
+if [ "$CLEANUP_SCAFFOLD" = "true" ]; then
+    _cleanup_scaffolding "$REPO_PATH"
+fi
+
+# ─── Save results ────────────────────────────────────────────────────────────────
 
 jq -n \
     --arg task "$TASK_NAME" \
     --arg condition "$CONDITION" \
     --arg repo "$REPO_PATH" \
+    --arg model "$MODEL" \
     --arg timestamp "$(iso_timestamp)" \
     --argjson input_tokens "$INPUT_TOKENS" \
     --argjson output_tokens "$OUTPUT_TOKENS" \
     --argjson duration_seconds "$DURATION" \
-    --argjson response "$ESCAPED_RESPONSE" \
+    --argjson num_turns "$NUM_TURNS" \
+    --arg response "$RESPONSE_TEXT" \
     '{
         task: $task,
         condition: $condition,
         repo: $repo,
+        model: $model,
         timestamp: $timestamp,
         input_tokens: $input_tokens,
         output_tokens: $output_tokens,
         total_tokens: ($input_tokens + $output_tokens),
         duration_seconds: $duration_seconds,
+        num_turns: $num_turns,
         response: $response
     }' > "$RESULT_FILE"
 
@@ -215,8 +340,13 @@ echo ""
 echo "Results:"
 echo "  Task:          $TASK_NAME"
 echo "  Condition:     $CONDITION scaffolding"
+echo "  Model:         $MODEL"
 echo "  Input tokens:  $INPUT_TOKENS"
 echo "  Output tokens: $OUTPUT_TOKENS"
 echo "  Total tokens:  $((INPUT_TOKENS + OUTPUT_TOKENS))"
+echo "  Agent turns:   $NUM_TURNS"
 echo "  Duration:      ${DURATION}s"
 echo "  Saved to:      $RESULT_FILE"
+echo ""
+echo "To judge accuracy:"
+echo "  $(basename "$0") $REPO_PATH $TASK_FILE --judge $RESULT_FILE"

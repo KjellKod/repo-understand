@@ -1,23 +1,26 @@
 # Benchmark Walkthrough
 
 Step-by-step guide to measuring whether repo-understand scaffolding
-actually helps AI agents work faster and cheaper on your codebase.
+actually helps AI agents work faster, cheaper, and more accurately.
 
 ## What you're measuring
 
-One question: **does having the generated docs reduce token usage and
-improve accuracy when an agent works on your repo?**
+Three things:
+1. **Time** — does the agent finish faster with scaffolding?
+2. **Tokens** — does the full agent session cost fewer tokens?
+3. **Accuracy** — does the agent produce a better answer?
 
-You run the same task twice — once without scaffolding (baseline), once
-with — and compare the results.
+The agent runs in **full agent mode** with file access (Read, Glob, Grep).
+Without scaffolding, it must explore the codebase from scratch. With
+scaffolding, the generated docs are in the repo for it to discover.
 
 ## Prerequisites
 
 - `jq` installed
-- Either the `claude` CLI or `ANTHROPIC_API_KEY` set in your environment
+- `claude` CLI installed and authenticated
 - A target repository to analyze
 
-Set up a convenience variable for the benchmark directory:
+Set up a convenience variable:
 
 ```bash
 BENCHMARK_DIR=/path/to/repo-understand/benchmark
@@ -34,7 +37,7 @@ There are 3 built-in tasks that work on any repository.
 $BENCHMARK_DIR/benchmark.sh /path/to/target/repo \
   $BENCHMARK_DIR/tasks/explain-architecture.md --without-scaffolding
 
-# With scaffolding (agent gets generated docs as context)
+# With scaffolding (generated docs are in the repo for the agent to find)
 $BENCHMARK_DIR/benchmark.sh /path/to/target/repo \
   $BENCHMARK_DIR/tasks/explain-architecture.md --with-scaffolding
 ```
@@ -68,7 +71,32 @@ $BENCHMARK_DIR/report.sh
 This reads all result JSON files from `benchmark/results/` and produces
 `benchmark/results/benchmark-report.md` with a comparison table.
 
-## Part 2: Write domain-specific tasks
+## Part 2: Judge accuracy
+
+After running tasks, you can have a separate agent score each result.
+This is automated — no manual scoring needed.
+
+```bash
+# Judge a specific result file
+$BENCHMARK_DIR/benchmark.sh /path/to/target/repo \
+  $BENCHMARK_DIR/tasks/explain-architecture.md \
+  --judge benchmark/results/20260222_143000_explain-architecture_without.json
+
+# With an answer key (for domain-specific tasks)
+$BENCHMARK_DIR/benchmark.sh /path/to/target/repo \
+  /path/to/custom-task.md \
+  --judge benchmark/results/some_result.json \
+  --answer-key /path/to/answer-key.md
+```
+
+The judge pass:
+1. Reads the original task and the agent's response from the result file
+2. Optionally reads an answer key (ground truth)
+3. Scores accuracy (1-5), completeness (1-5), and counts hallucinations
+4. Writes the scores back into the result JSON file
+5. Re-running `report.sh` will include the accuracy table
+
+## Part 3: Write domain-specific tasks
 
 The generic tasks test general understanding. But the real value of
 scaffolding shows up on **domain-specific questions** — the kind where
@@ -124,8 +152,7 @@ Your answer should include:
 - With scaffolding: 2/5 (docs show service boundaries and dependencies)
 ```
 
-Save it anywhere — the benchmark harness takes any markdown file as a
-task:
+Save it anywhere. The benchmark harness takes any markdown file as a task:
 
 ```bash
 # Run your domain-specific task
@@ -134,53 +161,83 @@ $BENCHMARK_DIR/benchmark.sh /path/to/target/repo \
 
 $BENCHMARK_DIR/benchmark.sh /path/to/target/repo \
   /path/to/your-custom-task.md --with-scaffolding
+
+# Judge with answer key
+$BENCHMARK_DIR/benchmark.sh /path/to/target/repo \
+  /path/to/your-custom-task.md \
+  --judge benchmark/results/<result-file>.json \
+  --answer-key /path/to/answer-key.md
 ```
 
 ### Tips for domain-specific tasks
 
-- **Keep an answer key.** Write down the correct answer separately so you
-  can score the agent's response accurately.
+- **Keep an answer key.** Write down the correct answer separately. Pass
+  it to `--answer-key` so the judge can score against ground truth.
 - **Pick tasks where scaffolding should help.** Cross-cutting concerns,
   multi-package flows, and "where does X live?" questions benefit most.
 - **Pick one task where scaffolding should NOT help.** Something very
   localized (e.g., "what does this specific function do?") serves as a
   control — scaffolding shouldn't make a difference there.
 
-## Part 3: Interpret the results
+## Part 4: Interpret the results
 
-After running all tasks, generate the report:
+After running all tasks and judging them, generate the report:
 
 ```bash
 $BENCHMARK_DIR/report.sh
 ```
 
-The report shows a table like this for each task:
+The report shows two tables per task:
 
+**Performance:**
 ```
 | Metric         | Without Scaffolding | With Scaffolding | Delta |
 |----------------|--------------------:|-----------------:|------:|
-| Input Tokens   |              45000  |           12000  |  -73% |
-| Output Tokens  |               2100  |            1800  |  -14% |
-| Total Tokens   |              47100  |           13800  |  -71% |
-| Duration (s)   |                 38  |              12  |  -68% |
+| Duration (s)   |                 45  |              18  |  -60% |
+| Input Tokens   |              85000  |           32000  |  -62% |
+| Output Tokens  |               3200  |            2800  |  -12% |
+| Total Tokens   |              88200  |           34800  |  -61% |
+| Agent Turns    |                 12  |               5  |  -58% |
+```
+
+**Accuracy (if judged):**
+```
+| Metric              | Without Scaffolding | With Scaffolding | Delta |
+|---------------------|--------------------:|-----------------:|------:|
+| Accuracy (1-5)      |                  3  |               4  |  +33% |
+| Completeness (1-5)  |                  2  |               5  | +150% |
+| Hallucinations      |                  3  |               0  | -100% |
 ```
 
 ### What to look for
 
-**Input tokens** is the primary metric. Lower input tokens with
-scaffolding means the agent didn't need to explore as many files —
-the generated docs gave it the context it needed upfront.
+**Duration** is the primary metric. Lower duration with scaffolding means
+the agent reached its answer faster because it didn't need to explore as
+many files.
 
-**Duration** should correlate with input tokens — fewer file reads
-means faster completion.
+**Agent Turns** shows how many tool-use round trips the agent needed.
+Fewer turns with scaffolding means the generated docs provided enough
+context to reduce exploration.
 
-**Output tokens** may not change much. The agent writes roughly the
-same answer either way.
+**Total Tokens** reflects the full session cost. With scaffolding, total
+session tokens should be lower if the agent explores less.
 
-**Quality** requires manual scoring using the rubric in each task file.
-Read both responses side by side and score each 1-5. The scaffolded
-response should be more accurate and have fewer hallucinations because
-the agent started with correct structural information.
+**Accuracy and Completeness** show whether the agent's answer was correct
+and thorough. Scaffolding should improve both by giving the agent accurate
+structural information upfront.
+
+**Hallucinations** count fabricated claims. Agents without scaffolding are
+more likely to guess at repo structure and get it wrong.
+
+### Options
+
+```bash
+# Use a different model
+$BENCHMARK_DIR/benchmark.sh /path/to/repo task.md --model opus --without-scaffolding
+
+# Set a higher budget cap per run (default: $0.50)
+$BENCHMARK_DIR/benchmark.sh /path/to/repo task.md --max-budget 2.00 --without-scaffolding
+```
 
 ### Running multiple times
 
@@ -196,4 +253,4 @@ automatically averages across multiple runs of the same task/condition.
 | Custom task files | Anywhere you choose | Up to you |
 | Result JSON files | `benchmark/results/*.json` | No — gitignored |
 | Comparison report | `benchmark/results/benchmark-report.md` | No — gitignored |
-| Scaffolding (during benchmark) | `/tmp/benchmark-scaffold.XXXXXX/` | No — auto-deleted |
+| Scaffolding (with condition) | Target repo (cleaned up after) | No — removed after run |
