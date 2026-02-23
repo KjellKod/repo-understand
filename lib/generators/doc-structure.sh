@@ -152,6 +152,10 @@ generate_doc_structure() {
     fi
     [ -z "$doc_gaps" ] && doc_gaps="No significant documentation gaps detected."
 
+    # Cross-references
+    local cross_refs
+    cross_refs=$(write_cross_references "doc-structure.md")
+
     cat > "$output_file" <<DOCSTRUCT
 ${header}
 
@@ -172,6 +176,7 @@ ${nav_table}
 ## Documentation Gaps
 
 ${doc_gaps}
+${cross_refs}
 DOCSTRUCT
 
     log_success "Generated $(basename "$output_file")"

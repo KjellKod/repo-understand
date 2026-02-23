@@ -196,6 +196,10 @@ Detected structural patterns:
         git_activity="Git history analysis not available."
     fi
 
+    # Cross-references
+    local cross_refs
+    cross_refs=$(write_cross_references "docs/architecture/overview.md")
+
     # Assemble the document
     cat > "$output_file" <<OVERVIEW
 ${header}
@@ -225,6 +229,7 @@ ${patterns_summary}
 ## Active Development Areas
 
 ${git_activity}
+${cross_refs}
 OVERVIEW
 
     log_success "Generated $(basename "$output_file")"
