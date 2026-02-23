@@ -28,9 +28,6 @@ generate_architecture_overview() {
     # Repo description
     local description
     description=$(jq -r '.description // "No description available"' "$structure_json")
-    local repo_name
-    repo_name=$(jq -r '.root' "$structure_json")
-
     # Structure type
     local is_monorepo
     is_monorepo=$(jq -r '.is_monorepo' "$structure_json")

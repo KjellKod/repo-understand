@@ -13,8 +13,6 @@ generate_tech_stack_doc() {
     ensure_dir "$(dirname "$output_file")"
 
     local ts_json="$tmp_dir/tech-stack.json"
-    local structure_json="$tmp_dir/structure.json"
-
     local header
     header=$(write_generated_header \
         "Technology Stack" \

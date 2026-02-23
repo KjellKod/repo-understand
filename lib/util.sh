@@ -9,14 +9,12 @@ if [ -t 1 ]; then
     COLOR_YELLOW='\033[0;33m'
     COLOR_RED='\033[0;31m'
     COLOR_BLUE='\033[0;34m'
-    COLOR_BOLD='\033[1m'
 else
     COLOR_RESET=''
     COLOR_GREEN=''
     COLOR_YELLOW=''
     COLOR_RED=''
     COLOR_BLUE=''
-    COLOR_BOLD=''
 fi
 
 log_info() {

@@ -23,17 +23,12 @@ analyze_dependencies() {
 
     # For each package.json, check if any dependency references another internal package
     # Write internal deps to file directly (not via pipe) to avoid subshell variable loss
-    > "$tmp_dir/_internal_deps_raw.txt"
+    : > "$tmp_dir/_internal_deps_raw.txt"
     while IFS= read -r pjson; do
         [ -z "$pjson" ] && continue
         local src_name
         src_name=$(jq -r '.name // empty' "$pjson" 2>/dev/null)
         [ -z "$src_name" ] && continue
-
-        local src_dir
-        src_dir=$(dirname "$pjson")
-        local src_rel
-        src_rel="${src_dir#$repo_path/}"
 
         # Count external deps
         local ext_count
