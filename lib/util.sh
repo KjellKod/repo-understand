@@ -126,3 +126,55 @@ to_lower() {
 trim() {
     echo "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
+
+# Write cross-reference markdown section linking to the other 4 generated files.
+# Usage: write_cross_references "docs/architecture/overview.md"
+# Outputs markdown to stdout; caller appends to generated file.
+write_cross_references() {
+    local current="$1"
+    local arch_prefix=""
+    local root_prefix=""
+
+    case "$current" in
+        docs/architecture/*)
+            arch_prefix=""
+            root_prefix="../../"
+            ;;
+        *)
+            arch_prefix="docs/architecture/"
+            root_prefix=""
+            ;;
+    esac
+
+    local section=""
+    section="${section}
+---
+
+## Related Documents
+
+These documents were generated together by \`repo-understand.sh\`:
+
+"
+    if [ "$current" != "docs/architecture/overview.md" ]; then
+        section="${section}- [Architecture Overview](${arch_prefix}overview.md) -- High-level architecture and component relationships
+"
+    fi
+    if [ "$current" != "docs/architecture/tech-stack.md" ]; then
+        section="${section}- [Technology Stack](${arch_prefix}tech-stack.md) -- Languages, frameworks, and tools
+"
+    fi
+    if [ "$current" != "docs/architecture/directory-map.md" ]; then
+        section="${section}- [Directory Map](${arch_prefix}directory-map.md) -- Annotated directory tree
+"
+    fi
+    if [ "$current" != "agents-content.md" ]; then
+        section="${section}- [Agent Guidance](${root_prefix}agents-content.md) -- Architecture boundaries and rules for AI agents
+"
+    fi
+    if [ "$current" != "doc-structure.md" ]; then
+        section="${section}- [Documentation Structure](${root_prefix}doc-structure.md) -- Documentation navigation map
+"
+    fi
+
+    printf '%s' "$section"
+}

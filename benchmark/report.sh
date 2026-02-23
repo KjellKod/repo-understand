@@ -45,10 +45,10 @@ REPORT_FILE="$RESULTS_DIR/benchmark-report.md"
 
 log_info "Generating benchmark report from $RESULT_COUNT result files..."
 
-# Collect unique tasks
-TASKS_FILE=$(mktemp "${TMPDIR:-/tmp}/benchmark-tasks.XXXXXX")
+# Collect unique task+model combos
+TASKS_FILE=$(mktemp "${TMPDIR:-/tmp}/benchmark-tasks-XXXXXX")
 find "$RESULTS_DIR" -name '*.json' -type f 2>/dev/null | while IFS= read -r f; do
-    jq -r '.task' "$f" 2>/dev/null
+    jq -r '"\(.task)\t\(.model // "unknown")"' "$f" 2>/dev/null
 done | sort -u > "$TASKS_FILE"
 
 cat > "$REPORT_FILE" <<'HEADER'
@@ -68,11 +68,12 @@ needs to explore the codebase.
 
 HEADER
 
-# For each task, show with vs without comparison
-while IFS= read -r task; do
+# For each task+model combo, show with vs without comparison
+while IFS=$'\t' read -r task model; do
     [ -z "$task" ] && continue
+    [ -z "$model" ] && model="unknown"
 
-    echo "### Task: $task" >> "$REPORT_FILE"
+    echo "### Task: $task (model: $model)" >> "$REPORT_FILE"
     echo "" >> "$REPORT_FILE"
 
     # Performance metrics table
@@ -91,7 +92,9 @@ while IFS= read -r task; do
             [ -z "$f" ] && continue
             file_task=$(jq -r '.task' "$f" 2>/dev/null)
             file_cond=$(jq -r '.condition' "$f" 2>/dev/null)
+            file_model=$(jq -r '.model // "unknown"' "$f" 2>/dev/null)
             [ "$file_task" != "$task" ] && continue
+            [ "$file_model" != "$model" ] && continue
 
             val=$(jq -r ".$metric // 0" "$f" 2>/dev/null)
             if [ "$file_cond" = "without" ]; then
@@ -149,7 +152,9 @@ while IFS= read -r task; do
     while IFS= read -r f; do
         [ -z "$f" ] && continue
         file_task=$(jq -r '.task' "$f" 2>/dev/null)
+        file_model=$(jq -r '.model // "unknown"' "$f" 2>/dev/null)
         [ "$file_task" != "$task" ] && continue
+        [ "$file_model" != "$model" ] && continue
         acc=$(jq -r '.accuracy // empty' "$f" 2>/dev/null)
         if [ -n "$acc" ]; then
             has_accuracy="true"
@@ -173,7 +178,9 @@ while IFS= read -r task; do
                 [ -z "$f" ] && continue
                 file_task=$(jq -r '.task' "$f" 2>/dev/null)
                 file_cond=$(jq -r '.condition' "$f" 2>/dev/null)
+                file_model=$(jq -r '.model // "unknown"' "$f" 2>/dev/null)
                 [ "$file_task" != "$task" ] && continue
+                [ "$file_model" != "$model" ] && continue
 
                 val=$(jq -r ".$metric // empty" "$f" 2>/dev/null)
                 [ -z "$val" ] && continue
@@ -250,12 +257,15 @@ the agent reached its answer faster because it didn't need to explore as
 many files.
 
 **Agent Turns** shows how many tool-use round trips the agent needed.
-Fewer turns with scaffolding means the generated docs provided enough
-context to reduce exploration.
+More turns with scaffolding is normal and expected -- the agent has a
+roadmap and makes targeted reads instead of giving up early. Evaluate
+turns alongside duration: more turns in less time = efficient, focused
+exploration.
 
 **Total Tokens** reflects the full session cost. With scaffolding, the
-initial input is larger (the docs are in the repo), but total session
-tokens should be lower if the agent explores less.
+agent may use more tokens because it explores more thoroughly. The key
+tradeoff is cost vs quality -- check accuracy scores to see if extra
+tokens produced better answers.
 
 **Accuracy and Completeness** (if judged) show whether the agent's answer
 was correct and thorough. Scaffolding should improve both by giving the

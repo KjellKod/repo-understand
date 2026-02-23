@@ -117,6 +117,10 @@ ${notable}"
         fi
     done < "$entries_file"
 
+    # Cross-references
+    local cross_refs
+    cross_refs=$(write_cross_references "docs/architecture/directory-map.md")
+
     cat > "$output_file" <<DIRMAP
 ${header}
 
@@ -130,6 +134,7 @@ ${tree_output}\`\`\`
 ## Directory Details
 
 ${details_output}
+${cross_refs}
 DIRMAP
 
     log_success "Generated $(basename "$output_file")"

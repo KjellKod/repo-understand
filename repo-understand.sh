@@ -164,12 +164,14 @@ END_TIME=$(date +%s)
 SCAN_DURATION=$((END_TIME - START_TIME))
 
 jq -n \
+    --arg version "0.0.2" \
     --arg generated_at "$TIMESTAMP" \
     --arg git_sha "$GIT_SHA" \
     --arg repo_path "$REPO_PATH" \
     --argjson total_files "$TOTAL_FILES" \
     --argjson scan_duration_seconds "$SCAN_DURATION" \
     '{
+        version: $version,
         generated_at: $generated_at,
         git_sha: $git_sha,
         repo_path: $repo_path,

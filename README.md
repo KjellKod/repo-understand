@@ -169,12 +169,25 @@ $BENCHMARK_DIR/benchmark.sh /path/to/target/repo $BENCHMARK_DIR/tasks/explain-ar
 # Run WITH scaffolding (generated docs are in the repo for the agent to find)
 $BENCHMARK_DIR/benchmark.sh /path/to/target/repo $BENCHMARK_DIR/tasks/explain-architecture.md --with-scaffolding
 
-# Judge accuracy (automated, uses a separate agent pass)
+# Judge scoring runs automatically after each benchmark.
+# To re-judge a previous result manually:
 $BENCHMARK_DIR/benchmark.sh /path/to/target/repo $BENCHMARK_DIR/tasks/explain-architecture.md --judge benchmark/results/<result>.json
 
 # Generate comparison report
 $BENCHMARK_DIR/report.sh
 ```
+
+### Benchmark options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--without-scaffolding` | | Agent explores from scratch (baseline) |
+| `--with-scaffolding` | | Generate docs first, agent can discover them |
+| `--model <model>` | `sonnet` | Model to use (e.g. `opus`, `haiku`, `sonnet`) |
+| `--max-budget <usd>` | `0.50` | Max spend per run in USD |
+| `--no-judge` | | Skip automatic judge scoring after benchmark |
+| `--judge <result-file>` | | Re-judge a previous result for accuracy |
+| `--answer-key <file>` | | Answer key for judge scoring (improves accuracy) |
 
 See the [walkthrough](BENCHMARK_WALKTHROUGH.md) for the full guide including
 how to write domain-specific tasks, use answer keys, and interpret results.

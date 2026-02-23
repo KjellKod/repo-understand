@@ -55,7 +55,9 @@ jobs:
           test -s repo-understand.manifest.json
           echo "manifest exists and is non-empty"
           jq -e '.generated_at' repo-understand.manifest.json
-          echo "manifest is valid JSON with expected fields"
+          echo "manifest has generated_at field"
+          jq -e '.version' repo-understand.manifest.json
+          echo "manifest has version field"
           test -s docs/architecture/overview.md
           test -s docs/architecture/tech-stack.md
           test -s docs/architecture/directory-map.md

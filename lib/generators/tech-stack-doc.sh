@@ -156,6 +156,10 @@ Most commonly used dependencies:
         fi
     fi
 
+    # Cross-references
+    local cross_refs
+    cross_refs=$(write_cross_references "docs/architecture/tech-stack.md")
+
     cat > "$output_file" <<TECHSTACK
 ${header}
 
@@ -184,6 +188,7 @@ ${test_tools_table}
 ## Notable Dependencies
 
 ${notable_deps}
+${cross_refs}
 TECHSTACK
 
     log_success "Generated $(basename "$output_file")"

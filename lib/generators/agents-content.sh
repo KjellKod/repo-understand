@@ -133,6 +133,10 @@ When adding or modifying code:
     fi
     [ -z "$entry_points" ] && entry_points="No specific entry points detected. Check package.json scripts or README for run instructions."
 
+    # Cross-references
+    local cross_refs
+    cross_refs=$(write_cross_references "agents-content.md")
+
     cat > "$output_file" <<AGENTS
 ${header}
 
@@ -158,6 +162,7 @@ ${testing_expectations}
 ## Key Entry Points
 
 ${entry_points}
+${cross_refs}
 AGENTS
 
     log_success "Generated $(basename "$output_file")"
