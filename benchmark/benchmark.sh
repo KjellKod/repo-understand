@@ -327,11 +327,7 @@ NUM_TURNS=$(jq -r '(.num_turns // 0)' "$RESPONSE_FILE")
 COST_USD=$(jq -r '(.total_cost_usd // 0)' "$RESPONSE_FILE")
 SUBTYPE=$(jq -r '(.subtype // "unknown")' "$RESPONSE_FILE")
 
-# Warn if agent hit budget cap before finishing
-if [ "$SUBTYPE" = "error_max_budget_usd" ]; then
-    log_error "Agent hit budget cap (\$$MAX_BUDGET) before completing. Response may be empty."
-    log_error "Try increasing --max-budget (e.g. --max-budget 2.00)"
-fi
+# Just informational — no stopping on budget. Let judge handle incomplete responses.
 rm -f "$RESPONSE_FILE"
 
 log_info "Raw response saved: $RAW_RESPONSE_FILE"
