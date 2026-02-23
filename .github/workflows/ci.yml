@@ -13,14 +13,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Run ShellCheck
-        run: find . -name '*.sh' | xargs shellcheck -S warning
+        run: find . -name '*.sh' -not -path './.git/*' -not -path './.ws/*' -print0 | xargs -0 shellcheck -S warning
 
   lint-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0  # full history needed for git-insights analyzer
 
       - name: Check jq is available
         run: jq --version
@@ -38,26 +38,27 @@ jobs:
 
       - name: Bash syntax check
         run: |
-          find . -name '*.sh' -print0 | while IFS= read -r -d '' f; do
-            echo "Checking $f..."
-            bash -n "$f"
-          done
+          failed=0
+          while IFS= read -r -d '' f; do
+              echo "Checking $f..."
+              bash -n "$f" || failed=1
+          done < <(find . -name '*.sh' -not -path './.git/*' -not -path './.ws/*' -print0)
+          [ "$failed" -eq 0 ] || { echo "Syntax check failed"; exit 1; }
           echo "All scripts pass syntax check"
 
       - name: Full run on this repo
-        run: |
-          chmod +x repo-understand.sh
-          ./repo-understand.sh .
+        timeout-minutes: 5
+        run: ./repo-understand.sh .
 
       - name: Verify output
         run: |
-          test -f repo-understand.manifest.json
-          echo "manifest exists"
-          jq -e '.version' repo-understand.manifest.json
-          echo "manifest is valid JSON with version field"
-          test -f docs/architecture/overview.md
-          echo "overview.md exists"
-          test -f docs/architecture/tech-stack.md
-          echo "tech-stack.md exists"
-          test -f docs/architecture/directory-map.md
-          echo "directory-map.md exists"
+          test -s repo-understand.manifest.json
+          echo "manifest exists and is non-empty"
+          jq -e '.generated_at' repo-understand.manifest.json
+          echo "manifest is valid JSON with expected fields"
+          test -s docs/architecture/overview.md
+          test -s docs/architecture/tech-stack.md
+          test -s docs/architecture/directory-map.md
+          test -s agents-content.md
+          test -s doc-structure.md
+          echo "all generated artifacts exist and are non-empty"
