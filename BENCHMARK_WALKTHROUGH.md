@@ -216,11 +216,15 @@ the agent reached its answer faster because it didn't need to explore as
 many files.
 
 **Agent Turns** shows how many tool-use round trips the agent needed.
-Fewer turns with scaffolding means the generated docs provided enough
-context to reduce exploration.
+More turns with scaffolding is normal and expected -- the agent has a
+roadmap and makes targeted reads instead of giving up early. Evaluate
+turns alongside duration: more turns in less time = efficient, focused
+exploration.
 
-**Total Tokens** reflects the full session cost. With scaffolding, total
-session tokens should be lower if the agent explores less.
+**Total Tokens** reflects the full session cost. With scaffolding, the
+agent may use more tokens because it explores more thoroughly. The key
+tradeoff is cost vs quality -- check accuracy scores to see if extra
+tokens produced better answers.
 
 **Accuracy and Completeness** show whether the agent's answer was correct
 and thorough. Scaffolding should improve both by giving the agent accurate
