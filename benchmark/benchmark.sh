@@ -157,7 +157,7 @@ Arguments:
 Options:
   --answer-key <file>    Answer key for judge scoring (optional)
   --model <model>        Model to use (default: sonnet)
-  --max-budget <usd>     Max spend per run in USD (default: 0.50)
+  --max-budget <usd>     Max spend per run in USD (default: 2.00)
   --no-judge             Skip automatic judge scoring after benchmark
 
 Requires: jq, claude CLI
@@ -172,7 +172,7 @@ MODE="benchmark"
 JUDGE_RESULT_FILE=""
 ANSWER_KEY_FILE=""
 MODEL="sonnet"
-MAX_BUDGET="0.50"
+MAX_BUDGET="2.00"
 AUTO_JUDGE="true"
 
 while [ $# -gt 0 ]; do
