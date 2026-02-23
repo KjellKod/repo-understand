@@ -176,5 +176,16 @@ $BENCHMARK_DIR/benchmark.sh /path/to/target/repo $BENCHMARK_DIR/tasks/explain-ar
 $BENCHMARK_DIR/report.sh
 ```
 
+### Benchmark options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--without-scaffolding` | | Agent explores from scratch (baseline) |
+| `--with-scaffolding` | | Generate docs first, agent can discover them |
+| `--model <model>` | `sonnet` | Model to use (e.g. `opus`, `haiku`, `sonnet`) |
+| `--max-budget <usd>` | `0.50` | Max spend per run in USD |
+| `--judge <result-file>` | | Score a previous result for accuracy |
+| `--answer-key <file>` | | Answer key for judge scoring (optional, with `--judge`) |
+
 See the [walkthrough](BENCHMARK_WALKTHROUGH.md) for the full guide including
 how to write domain-specific tasks, use answer keys, and interpret results.

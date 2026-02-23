@@ -176,7 +176,7 @@ Score the response using the rubric in the task above. Return ONLY a JSON object
 
     log_info "Judging result: $RESULT_TASK ($RESULT_CONDITION)"
 
-    JUDGE_RESPONSE_FILE=$(mktemp "${TMPDIR:-/tmp}/benchmark-judge.XXXXXX.json")
+    JUDGE_RESPONSE_FILE=$(mktemp "${TMPDIR:-/tmp}/benchmark-judge-XXXXXX")
 
     CLAUDECODE='' claude \
         --output-format json \
@@ -274,7 +274,7 @@ RESULT_FILE="$RESULTS_DIR/$(date +%Y%m%d_%H%M%S)_${TASK_NAME}_${CONDITION}.json"
 log_info "Executing benchmark: $TASK_NAME ($CONDITION scaffolding)"
 log_info "Model: $MODEL | Budget cap: \$$MAX_BUDGET"
 
-RESPONSE_FILE=$(mktemp "${TMPDIR:-/tmp}/benchmark-response.XXXXXX.json")
+RESPONSE_FILE=$(mktemp "${TMPDIR:-/tmp}/benchmark-response-XXXXXX")
 
 CLAUDECODE='' claude \
     --output-format json \

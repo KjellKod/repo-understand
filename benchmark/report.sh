@@ -45,10 +45,10 @@ REPORT_FILE="$RESULTS_DIR/benchmark-report.md"
 
 log_info "Generating benchmark report from $RESULT_COUNT result files..."
 
-# Collect unique tasks
-TASKS_FILE=$(mktemp "${TMPDIR:-/tmp}/benchmark-tasks.XXXXXX")
+# Collect unique task+model combos
+TASKS_FILE=$(mktemp "${TMPDIR:-/tmp}/benchmark-tasks-XXXXXX")
 find "$RESULTS_DIR" -name '*.json' -type f 2>/dev/null | while IFS= read -r f; do
-    jq -r '.task' "$f" 2>/dev/null
+    jq -r '"\(.task)\t\(.model // "unknown")"' "$f" 2>/dev/null
 done | sort -u > "$TASKS_FILE"
 
 cat > "$REPORT_FILE" <<'HEADER'
@@ -68,11 +68,12 @@ needs to explore the codebase.
 
 HEADER
 
-# For each task, show with vs without comparison
-while IFS= read -r task; do
+# For each task+model combo, show with vs without comparison
+while IFS=$'\t' read -r task model; do
     [ -z "$task" ] && continue
+    [ -z "$model" ] && model="unknown"
 
-    echo "### Task: $task" >> "$REPORT_FILE"
+    echo "### Task: $task (model: $model)" >> "$REPORT_FILE"
     echo "" >> "$REPORT_FILE"
 
     # Performance metrics table
@@ -91,7 +92,9 @@ while IFS= read -r task; do
             [ -z "$f" ] && continue
             file_task=$(jq -r '.task' "$f" 2>/dev/null)
             file_cond=$(jq -r '.condition' "$f" 2>/dev/null)
+            file_model=$(jq -r '.model // "unknown"' "$f" 2>/dev/null)
             [ "$file_task" != "$task" ] && continue
+            [ "$file_model" != "$model" ] && continue
 
             val=$(jq -r ".$metric // 0" "$f" 2>/dev/null)
             if [ "$file_cond" = "without" ]; then
@@ -149,7 +152,9 @@ while IFS= read -r task; do
     while IFS= read -r f; do
         [ -z "$f" ] && continue
         file_task=$(jq -r '.task' "$f" 2>/dev/null)
+        file_model=$(jq -r '.model // "unknown"' "$f" 2>/dev/null)
         [ "$file_task" != "$task" ] && continue
+        [ "$file_model" != "$model" ] && continue
         acc=$(jq -r '.accuracy // empty' "$f" 2>/dev/null)
         if [ -n "$acc" ]; then
             has_accuracy="true"
@@ -173,7 +178,9 @@ while IFS= read -r task; do
                 [ -z "$f" ] && continue
                 file_task=$(jq -r '.task' "$f" 2>/dev/null)
                 file_cond=$(jq -r '.condition' "$f" 2>/dev/null)
+                file_model=$(jq -r '.model // "unknown"' "$f" 2>/dev/null)
                 [ "$file_task" != "$task" ] && continue
+                [ "$file_model" != "$model" ] && continue
 
                 val=$(jq -r ".$metric // empty" "$f" 2>/dev/null)
                 [ -z "$val" ] && continue
