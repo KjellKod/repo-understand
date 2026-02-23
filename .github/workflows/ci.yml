@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check jq is available
+        run: jq --version
+
+      - name: Check all scripts are executable
+        run: |
+          failed=0
+          for f in repo-understand.sh benchmark/benchmark.sh benchmark/report.sh; do
+            if [ ! -x "$f" ]; then
+              echo "FAIL: $f is not executable"
+              failed=1
+            fi
+          done
+          exit $failed
+
+      - name: Bash syntax check
+        run: |
+          for f in \
+            repo-understand.sh \
+            lib/util.sh \
+            lib/analyzers/structure.sh \
+            lib/analyzers/tech-stack.sh \
+            lib/analyzers/dependencies.sh \
+            lib/analyzers/patterns.sh \
+            lib/analyzers/git-insights.sh \
+            lib/generators/architecture-overview.sh \
+            lib/generators/tech-stack-doc.sh \
+            lib/generators/directory-map.sh \
+            lib/generators/agents-content.sh \
+            lib/generators/doc-structure.sh \
+            benchmark/benchmark.sh \
+            benchmark/report.sh; do
+            echo "Checking $f..."
+            bash -n "$f"
+          done
+          echo "All scripts pass syntax check"
+
+      - name: Dry run on this repo
+        run: |
+          ./repo-understand.sh . --dry-run
