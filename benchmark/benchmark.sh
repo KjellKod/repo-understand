@@ -318,11 +318,20 @@ DURATION=$((END_TIME - START_TIME))
 RAW_RESPONSE_FILE="$RESULTS_DIR/$(date +%Y%m%d_%H%M%S)_${TASK_NAME}_${CONDITION}_raw.json"
 cp "$RESPONSE_FILE" "$RAW_RESPONSE_FILE"
 
-# Extract metrics — try multiple JSON paths for compatibility
-INPUT_TOKENS=$(jq -r '(.usage.input_tokens // .input_tokens // .session_usage.input_tokens // 0)' "$RESPONSE_FILE")
-OUTPUT_TOKENS=$(jq -r '(.usage.output_tokens // .output_tokens // .session_usage.output_tokens // 0)' "$RESPONSE_FILE")
-RESPONSE_TEXT=$(jq -r '(.result // .content // .message // "no response")' "$RESPONSE_FILE")
-NUM_TURNS=$(jq -r '(.num_turns // .turns // 0)' "$RESPONSE_FILE")
+# Extract metrics from Claude CLI JSON output
+# input_tokens only counts non-cached tokens; include cached tokens for real total
+INPUT_TOKENS=$(jq -r '[.usage.input_tokens // 0, .usage.cache_creation_input_tokens // 0, .usage.cache_read_input_tokens // 0] | add' "$RESPONSE_FILE")
+OUTPUT_TOKENS=$(jq -r '(.usage.output_tokens // 0)' "$RESPONSE_FILE")
+RESPONSE_TEXT=$(jq -r '(.result // "")' "$RESPONSE_FILE")
+NUM_TURNS=$(jq -r '(.num_turns // 0)' "$RESPONSE_FILE")
+COST_USD=$(jq -r '(.total_cost_usd // 0)' "$RESPONSE_FILE")
+SUBTYPE=$(jq -r '(.subtype // "unknown")' "$RESPONSE_FILE")
+
+# Warn if agent hit budget cap before finishing
+if [ "$SUBTYPE" = "error_max_budget_usd" ]; then
+    log_error "Agent hit budget cap (\$$MAX_BUDGET) before completing. Response may be empty."
+    log_error "Try increasing --max-budget (e.g. --max-budget 2.00)"
+fi
 rm -f "$RESPONSE_FILE"
 
 log_info "Raw response saved: $RAW_RESPONSE_FILE"
@@ -339,23 +348,27 @@ jq -n \
     --arg condition "$CONDITION" \
     --arg repo "$REPO_PATH" \
     --arg model "$MODEL" \
+    --arg status "$SUBTYPE" \
     --arg timestamp "$(iso_timestamp)" \
     --argjson input_tokens "$INPUT_TOKENS" \
     --argjson output_tokens "$OUTPUT_TOKENS" \
     --argjson duration_seconds "$DURATION" \
     --argjson num_turns "$NUM_TURNS" \
+    --argjson cost_usd "$COST_USD" \
     --arg response "$RESPONSE_TEXT" \
     '{
         task: $task,
         condition: $condition,
         repo: $repo,
         model: $model,
+        status: $status,
         timestamp: $timestamp,
         input_tokens: $input_tokens,
         output_tokens: $output_tokens,
         total_tokens: ($input_tokens + $output_tokens),
         duration_seconds: $duration_seconds,
         num_turns: $num_turns,
+        cost_usd: $cost_usd,
         response: $response
     }' > "$RESULT_FILE"
 
@@ -365,10 +378,12 @@ echo "Results:"
 echo "  Task:          $TASK_NAME"
 echo "  Condition:     $CONDITION scaffolding"
 echo "  Model:         $MODEL"
-echo "  Input tokens:  $INPUT_TOKENS"
+echo "  Status:        $SUBTYPE"
+echo "  Input tokens:  $INPUT_TOKENS (including cached)"
 echo "  Output tokens: $OUTPUT_TOKENS"
 echo "  Total tokens:  $((INPUT_TOKENS + OUTPUT_TOKENS))"
 echo "  Agent turns:   $NUM_TURNS"
+echo "  Cost:          \$$COST_USD"
 echo "  Duration:      ${DURATION}s"
 echo "  Saved to:      $RESULT_FILE"
 
