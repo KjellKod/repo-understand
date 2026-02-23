@@ -314,12 +314,18 @@ CLAUDECODE='' claude \
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 
-# Extract metrics from response
-INPUT_TOKENS=$(jq -r '.usage.input_tokens // 0' "$RESPONSE_FILE")
-OUTPUT_TOKENS=$(jq -r '.usage.output_tokens // 0' "$RESPONSE_FILE")
-RESPONSE_TEXT=$(jq -r '.result // .content // "no response"' "$RESPONSE_FILE")
-NUM_TURNS=$(jq -r '.num_turns // 0' "$RESPONSE_FILE")
+# Save raw response for debugging (kept alongside results)
+RAW_RESPONSE_FILE="$RESULTS_DIR/$(date +%Y%m%d_%H%M%S)_${TASK_NAME}_${CONDITION}_raw.json"
+cp "$RESPONSE_FILE" "$RAW_RESPONSE_FILE"
+
+# Extract metrics — try multiple JSON paths for compatibility
+INPUT_TOKENS=$(jq -r '(.usage.input_tokens // .input_tokens // .session_usage.input_tokens // 0)' "$RESPONSE_FILE")
+OUTPUT_TOKENS=$(jq -r '(.usage.output_tokens // .output_tokens // .session_usage.output_tokens // 0)' "$RESPONSE_FILE")
+RESPONSE_TEXT=$(jq -r '(.result // .content // .message // "no response")' "$RESPONSE_FILE")
+NUM_TURNS=$(jq -r '(.num_turns // .turns // 0)' "$RESPONSE_FILE")
 rm -f "$RESPONSE_FILE"
+
+log_info "Raw response saved: $RAW_RESPONSE_FILE"
 
 # Clean up scaffolding if we generated it
 if [ "$CLEANUP_SCAFFOLD" = "true" ]; then
