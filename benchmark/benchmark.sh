@@ -2,7 +2,7 @@
 # Benchmark harness for repo-understand
 # Measures time, tokens, and accuracy for agent tasks with/without scaffolding
 #
-# Usage: benchmark.sh <repo-path> <task-file> [--with-scaffolding | --without-scaffolding]
+# Usage: benchmark.sh <repo-path> <task-file> [--with-scaffolding | --without-scaffolding | --with-targeted-scaffolding]
 #        benchmark.sh <repo-path> <task-file> --judge <result-file> [--answer-key <file>]
 #
 # Bash 3.2 compatible. Requires: jq, claude CLI
@@ -14,6 +14,11 @@
 #   --with-scaffolding: First generates scaffolding docs into the repo, then
 #     runs claude as an agent with file access. The agent can read the generated
 #     docs as part of its exploration. Scaffolding is cleaned up after the run.
+#
+#   --with-targeted-scaffolding: Detects entry point files from the task query,
+#     traces their import/require dependencies (BFS, depth=2), and injects only
+#     those files into the prompt as pre-loaded context. Much cheaper than full
+#     scaffolding (~10 files vs entire repo).
 #
 #   --judge: Runs a separate claude pass to score a previous result for accuracy
 #     against the task rubric (and optional answer key).
@@ -146,9 +151,10 @@ Usage: $(basename "$0") <repo-path> <task-file> [options]
 Benchmark AI agent performance on a task with or without scaffolding.
 
 Modes:
-  --with-scaffolding     Run agent with generated scaffolding (default)
-  --without-scaffolding  Run agent without scaffolding (baseline)
-  --judge <result-file>  Score a previous result for accuracy
+  --with-scaffolding            Run agent with generated scaffolding (default)
+  --without-scaffolding         Run agent without scaffolding (baseline)
+  --with-targeted-scaffolding   Run agent with dependency-traced file context
+  --judge <result-file>         Score a previous result for accuracy
 
 Arguments:
   <repo-path>            Path to the repository to analyze
@@ -179,6 +185,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --with-scaffolding) CONDITION="with" ;;
         --without-scaffolding) CONDITION="without" ;;
+        --with-targeted-scaffolding) CONDITION="targeted" ;;
         --judge)
             MODE="judge"
             shift
@@ -273,6 +280,41 @@ Start by reading these files before exploring the codebase:
 - agents-content.md
 - doc-structure.md
 "
+elif [ "$CONDITION" = "targeted" ]; then
+    log_info "Building targeted scaffolding..."
+
+    # Source the targeted scaffolding orchestrator
+    . "$REPO_UNDERSTAND_DIR/lib/targeted-scaffolding.sh"
+
+    # Create dedicated temp directory for targeted scaffolding
+    TARGETED_TMP=$(mktemp -d "${TMPDIR:-/tmp}/benchmark-targeted-XXXXXX")
+    cleanup_targeted() {
+        [ -n "${TARGETED_TMP:-}" ] && rm -rf "$TARGETED_TMP"
+    }
+    trap cleanup_targeted EXIT
+
+    # Build targeted scaffolding payload
+    build_targeted_scaffolding "$REPO_PATH" "$TASK_CONTENT" "$TARGETED_TMP"
+
+    # Read payload into variable
+    if [ -f "$TARGETED_TMP/targeted_payload.txt" ] && [ -s "$TARGETED_TMP/targeted_payload.txt" ]; then
+        SCAFFOLD_HINT="
+
+$(cat "$TARGETED_TMP/targeted_payload.txt")
+"
+    else
+        log_warn "Targeted scaffolding produced empty payload, continuing without scaffolding"
+    fi
+
+    # Read file count for results (only files actually injected into payload)
+    if [ -f "$TARGETED_TMP/included_file_list.txt" ]; then
+        SCAFFOLDING_FILE_COUNT=$(wc -l < "$TARGETED_TMP/included_file_list.txt" | tr -d ' ')
+    elif [ -f "$TARGETED_TMP/file_list.txt" ]; then
+        # Backward-compatible fallback
+        SCAFFOLDING_FILE_COUNT=$(wc -l < "$TARGETED_TMP/file_list.txt" | tr -d ' ')
+    else
+        SCAFFOLDING_FILE_COUNT=0
+    fi
 fi
 
 # Build the agent prompt
@@ -308,6 +350,7 @@ CLAUDECODE='' claude \
     if [ "$CLEANUP_SCAFFOLD" = "true" ]; then
         _cleanup_scaffolding "$REPO_PATH"
     fi
+    [ -n "${TARGETED_TMP:-}" ] && rm -rf "$TARGETED_TMP"
     exit 1
 }
 
@@ -351,6 +394,7 @@ jq -n \
     --argjson duration_seconds "$DURATION" \
     --argjson num_turns "$NUM_TURNS" \
     --argjson cost_usd "$COST_USD" \
+    --argjson scaffolding_file_count "${SCAFFOLDING_FILE_COUNT:-0}" \
     --arg response "$RESPONSE_TEXT" \
     '{
         task: $task,
@@ -365,6 +409,7 @@ jq -n \
         duration_seconds: $duration_seconds,
         num_turns: $num_turns,
         cost_usd: $cost_usd,
+        scaffolding_file_count: $scaffolding_file_count,
         response: $response
     }' > "$RESULT_FILE"
 
