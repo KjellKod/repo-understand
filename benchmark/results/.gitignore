@@ -1,0 +1,3 @@
+# Benchmark results are local/ephemeral -- do not commit
+*.json
+benchmark-report.md
