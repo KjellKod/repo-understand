@@ -41,6 +41,102 @@ _cleanup_scaffolding() {
     rmdir "$repo/docs" 2>/dev/null || true
 }
 
+# Run judge on a result file. Updates the result JSON in-place with scores.
+# Args: <result-file> <task-content> <model> [answer-key-file]
+_run_judge() {
+    local result_file="$1"
+    local task_content="$2"
+    local judge_model="$3"
+    local answer_key_file="${4:-}"
+
+    local agent_response
+    local result_task
+    local result_condition
+    agent_response=$(jq -r '.response' "$result_file")
+    result_task=$(jq -r '.task' "$result_file")
+    result_condition=$(jq -r '.condition' "$result_file")
+
+    local answer_key_section=""
+    if [ -n "$answer_key_file" ] && [ -f "$answer_key_file" ]; then
+        answer_key_section="
+--- ANSWER KEY (ground truth) ---
+$(cat "$answer_key_file")
+"
+    fi
+
+    local judge_prompt="You are a benchmark judge. Score the following agent response for accuracy and completeness.
+
+--- TASK ---
+${task_content}
+${answer_key_section}
+--- AGENT RESPONSE ---
+${agent_response}
+
+--- INSTRUCTIONS ---
+Score the response using the rubric in the task above. Return ONLY a JSON object:
+{
+  \"accuracy\": <1-5>,
+  \"completeness\": <1-5>,
+  \"hallucination_count\": <number of fabricated claims>,
+  \"reasoning\": \"<brief explanation of scores>\"
+}"
+
+    log_info "Judging result: $result_task ($result_condition)"
+
+    local judge_response_file
+    judge_response_file=$(mktemp "${TMPDIR:-/tmp}/benchmark-judge-XXXXXX")
+
+    CLAUDECODE='' claude \
+        --output-format json \
+        --model "$judge_model" \
+        --dangerously-skip-permissions \
+        --no-session-persistence \
+        -p "$judge_prompt" > "$judge_response_file" 2>/dev/null || {
+        log_error "Judge pass failed."
+        rm -f "$judge_response_file"
+        return 1
+    }
+
+    local judge_text
+    judge_text=$(jq -r '.result // .content // ""' "$judge_response_file")
+    rm -f "$judge_response_file"
+
+    # Extract JSON from judge response (may be wrapped in markdown)
+    local judge_json
+    judge_json=$(echo "$judge_text" | sed -n '/^{/,/^}/p' | head -20)
+    if [ -z "$judge_json" ]; then
+        judge_json=$(echo "$judge_text" | sed -n '/```json/,/```/p' | sed '1d;$d')
+    fi
+
+    if [ -n "$judge_json" ]; then
+        local accuracy completeness hallucinations reasoning updated
+        accuracy=$(echo "$judge_json" | jq -r '.accuracy // 0')
+        completeness=$(echo "$judge_json" | jq -r '.completeness // 0')
+        hallucinations=$(echo "$judge_json" | jq -r '.hallucination_count // 0')
+        reasoning=$(echo "$judge_json" | jq -r '.reasoning // ""')
+
+        updated=$(jq \
+            --argjson accuracy "$accuracy" \
+            --argjson completeness "$completeness" \
+            --argjson hallucinations "$hallucinations" \
+            --arg reasoning "$reasoning" \
+            '. + {accuracy: $accuracy, completeness: $completeness, hallucination_count: $hallucinations, judge_reasoning: $reasoning}' \
+            "$result_file")
+        echo "$updated" > "$result_file"
+
+        log_success "Judge scores added to result file"
+        echo ""
+        echo "  Accuracy:       $accuracy/5"
+        echo "  Completeness:   $completeness/5"
+        echo "  Hallucinations: $hallucinations"
+        echo "  Reasoning:      $reasoning"
+    else
+        log_error "Could not parse judge response"
+        echo "$judge_text"
+        return 1
+    fi
+}
+
 # ─── Argument parsing ───────────────────────────────────────────────────────────
 
 usage() {
@@ -62,6 +158,7 @@ Options:
   --answer-key <file>    Answer key for judge scoring (optional)
   --model <model>        Model to use (default: sonnet)
   --max-budget <usd>     Max spend per run in USD (default: 0.50)
+  --no-judge             Skip automatic judge scoring after benchmark
 
 Requires: jq, claude CLI
 EOF
@@ -76,6 +173,7 @@ JUDGE_RESULT_FILE=""
 ANSWER_KEY_FILE=""
 MODEL="sonnet"
 MAX_BUDGET="0.50"
+AUTO_JUDGE="true"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -102,6 +200,7 @@ while [ $# -gt 0 ]; do
             [ $# -eq 0 ] && { log_error "--max-budget requires a value"; usage; }
             MAX_BUDGET="$1"
             ;;
+        --no-judge) AUTO_JUDGE="false" ;;
         --help|-h) usage ;;
         -*)
             log_error "Unknown option: $1"
@@ -144,89 +243,8 @@ TASK_CONTENT=$(cat "$TASK_FILE")
 
 if [ "$MODE" = "judge" ]; then
     [ -f "$JUDGE_RESULT_FILE" ] || { log_error "Result file not found: $JUDGE_RESULT_FILE"; exit 1; }
-
-    AGENT_RESPONSE=$(jq -r '.response' "$JUDGE_RESULT_FILE")
-    RESULT_TASK=$(jq -r '.task' "$JUDGE_RESULT_FILE")
-    RESULT_CONDITION=$(jq -r '.condition' "$JUDGE_RESULT_FILE")
-
-    ANSWER_KEY_SECTION=""
-    if [ -n "$ANSWER_KEY_FILE" ] && [ -f "$ANSWER_KEY_FILE" ]; then
-        ANSWER_KEY_SECTION="
---- ANSWER KEY (ground truth) ---
-$(cat "$ANSWER_KEY_FILE")
-"
-    fi
-
-    JUDGE_PROMPT="You are a benchmark judge. Score the following agent response for accuracy and completeness.
-
---- TASK ---
-${TASK_CONTENT}
-${ANSWER_KEY_SECTION}
---- AGENT RESPONSE ---
-${AGENT_RESPONSE}
-
---- INSTRUCTIONS ---
-Score the response using the rubric in the task above. Return ONLY a JSON object:
-{
-  \"accuracy\": <1-5>,
-  \"completeness\": <1-5>,
-  \"hallucination_count\": <number of fabricated claims>,
-  \"reasoning\": \"<brief explanation of scores>\"
-}"
-
-    log_info "Judging result: $RESULT_TASK ($RESULT_CONDITION)"
-
-    JUDGE_RESPONSE_FILE=$(mktemp "${TMPDIR:-/tmp}/benchmark-judge-XXXXXX")
-
-    CLAUDECODE='' claude \
-        --output-format json \
-        --model "$MODEL" \
-        --dangerously-skip-permissions \
-        --no-session-persistence \
-        -p "$JUDGE_PROMPT" > "$JUDGE_RESPONSE_FILE" 2>/dev/null || {
-        log_error "Judge pass failed."
-        rm -f "$JUDGE_RESPONSE_FILE"
-        exit 1
-    }
-
-    JUDGE_TEXT=$(jq -r '.result // .content // ""' "$JUDGE_RESPONSE_FILE")
-    rm -f "$JUDGE_RESPONSE_FILE"
-
-    # Extract JSON from judge response (may be wrapped in markdown)
-    JUDGE_JSON=$(echo "$JUDGE_TEXT" | sed -n '/^{/,/^}/p' | head -20)
-    if [ -z "$JUDGE_JSON" ]; then
-        # Try extracting from code block
-        JUDGE_JSON=$(echo "$JUDGE_TEXT" | sed -n '/```json/,/```/p' | sed '1d;$d')
-    fi
-
-    if [ -n "$JUDGE_JSON" ]; then
-        ACCURACY=$(echo "$JUDGE_JSON" | jq -r '.accuracy // 0')
-        COMPLETENESS=$(echo "$JUDGE_JSON" | jq -r '.completeness // 0')
-        HALLUCINATIONS=$(echo "$JUDGE_JSON" | jq -r '.hallucination_count // 0')
-        REASONING=$(echo "$JUDGE_JSON" | jq -r '.reasoning // ""')
-
-        # Update the result file with judge scores
-        UPDATED=$(jq \
-            --argjson accuracy "$ACCURACY" \
-            --argjson completeness "$COMPLETENESS" \
-            --argjson hallucinations "$HALLUCINATIONS" \
-            --arg reasoning "$REASONING" \
-            '. + {accuracy: $accuracy, completeness: $completeness, hallucination_count: $hallucinations, judge_reasoning: $reasoning}' \
-            "$JUDGE_RESULT_FILE")
-        echo "$UPDATED" > "$JUDGE_RESULT_FILE"
-
-        log_success "Judge scores added to result file"
-        echo ""
-        echo "  Accuracy:       $ACCURACY/5"
-        echo "  Completeness:   $COMPLETENESS/5"
-        echo "  Hallucinations: $HALLUCINATIONS"
-        echo "  Reasoning:      $REASONING"
-    else
-        log_error "Could not parse judge response"
-        echo "$JUDGE_TEXT"
-    fi
-
-    exit 0
+    _run_judge "$JUDGE_RESULT_FILE" "$TASK_CONTENT" "$MODEL" "$ANSWER_KEY_FILE"
+    exit $?
 fi
 
 # ─── Benchmark mode ──────────────────────────────────────────────────────────────
@@ -347,6 +365,13 @@ echo "  Total tokens:  $((INPUT_TOKENS + OUTPUT_TOKENS))"
 echo "  Agent turns:   $NUM_TURNS"
 echo "  Duration:      ${DURATION}s"
 echo "  Saved to:      $RESULT_FILE"
-echo ""
-echo "To judge accuracy:"
-echo "  $(basename "$0") $REPO_PATH $TASK_FILE --judge $RESULT_FILE"
+
+# Auto-judge unless --no-judge was passed
+if [ "$AUTO_JUDGE" = "true" ]; then
+    echo ""
+    _run_judge "$RESULT_FILE" "$TASK_CONTENT" "$MODEL" "$ANSWER_KEY_FILE" || true
+else
+    echo ""
+    echo "To judge accuracy:"
+    echo "  $(basename "$0") $REPO_PATH $TASK_FILE --judge $RESULT_FILE"
+fi
