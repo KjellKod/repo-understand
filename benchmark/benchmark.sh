@@ -2,8 +2,8 @@
 # Benchmark harness for repo-understand
 # Measures time, tokens, and accuracy for agent tasks with/without scaffolding
 #
-# Usage: benchmark.sh <repo-path> <task-file> [--with-scaffolding | --without-scaffolding | --with-targeted-scaffolding]
-#        benchmark.sh <repo-path> <task-file> --judge <result-file> [--answer-key <file>]
+# Usage: benchmark.sh <repo-path> <task-prompt-file> [--with-scaffolding | --without-scaffolding]
+#        benchmark.sh <repo-path> <task-prompt-file> --judge <result-file> [--answer-key <file>]
 #
 # Bash 3.2 compatible. Requires: jq, claude CLI
 #
@@ -14,11 +14,6 @@
 #   --with-scaffolding: First generates scaffolding docs into the repo, then
 #     runs claude as an agent with file access. The agent can read the generated
 #     docs as part of its exploration. Scaffolding is cleaned up after the run.
-#
-#   --with-targeted-scaffolding: Detects entry point files from the task query,
-#     traces their import/require dependencies (BFS, depth=2), and injects only
-#     those files into the prompt as pre-loaded context. Much cheaper than full
-#     scaffolding (~10 files vs entire repo).
 #
 #   --judge: Runs a separate claude pass to score a previous result for accuracy
 #     against the task rubric (and optional answer key).
@@ -146,24 +141,26 @@ Score the response using the rubric in the task above. Return ONLY a JSON object
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") <repo-path> <task-file> [options]
+Usage: $(basename "$0") <repo-path> <task-prompt-file> [options]
 
 Benchmark AI agent performance on a task with or without scaffolding.
 
 Modes:
   --with-scaffolding            Run agent with generated scaffolding (default)
   --without-scaffolding         Run agent without scaffolding (baseline)
-  --with-targeted-scaffolding   Run agent with dependency-traced file context
   --judge <result-file>         Score a previous result for accuracy
 
 Arguments:
   <repo-path>            Path to the repository to analyze
-  <task-file>            Path to the benchmark task markdown file
+  <task-prompt-file>     Prompt-only task file sent to the agent
 
 Options:
-  --answer-key <file>    Answer key for judge scoring (optional)
-  --model <model>        Model to use (default: sonnet)
-  --max-budget <usd>     Max spend per run in USD (default: 2.00)
+  --answer-key <file>    Full explanation/rubric for judge scoring (never sent to benchmark agent)
+  --allow-rich-task-file Allow task file to include rubric/answer sections (unsafe; default is blocked)
+  --results-dir <dir>    Directory for benchmark JSON output (default: benchmark/results)
+  --task-name <name>     Override task name in result metadata/file naming
+  --model <model>        Model to use (default: opus)
+  --max-budget <usd>     Max spend per run in USD (default: 5.00)
   --no-judge             Skip automatic judge scoring after benchmark
 
 Requires: jq, claude CLI
@@ -177,15 +174,17 @@ CONDITION="with"
 MODE="benchmark"
 JUDGE_RESULT_FILE=""
 ANSWER_KEY_FILE=""
-MODEL="sonnet"
-MAX_BUDGET="2.00"
+MODEL="opus"
+MAX_BUDGET="5.00"
 AUTO_JUDGE="true"
+ALLOW_RICH_TASK_FILE="false"
+RESULTS_DIR_OVERRIDE=""
+TASK_NAME_OVERRIDE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --with-scaffolding) CONDITION="with" ;;
         --without-scaffolding) CONDITION="without" ;;
-        --with-targeted-scaffolding) CONDITION="targeted" ;;
         --judge)
             MODE="judge"
             shift
@@ -208,6 +207,17 @@ while [ $# -gt 0 ]; do
             MAX_BUDGET="$1"
             ;;
         --no-judge) AUTO_JUDGE="false" ;;
+        --allow-rich-task-file) ALLOW_RICH_TASK_FILE="true" ;;
+        --results-dir)
+            shift
+            [ $# -eq 0 ] && { log_error "--results-dir requires a path"; usage; }
+            RESULTS_DIR_OVERRIDE="$1"
+            ;;
+        --task-name)
+            shift
+            [ $# -eq 0 ] && { log_error "--task-name requires a value"; usage; }
+            TASK_NAME_OVERRIDE="$1"
+            ;;
         --help|-h) usage ;;
         -*)
             log_error "Unknown option: $1"
@@ -234,6 +244,17 @@ done
 REPO_PATH="$(cd "$REPO_PATH" 2>/dev/null && pwd)" || { log_error "Invalid repo path"; exit 1; }
 [ -f "$TASK_FILE" ] || { log_error "Task file not found: $TASK_FILE"; exit 1; }
 
+# Guardrail: by default, reject task files that include expected-answer/rubric
+# sections to avoid benchmark leakage into the agent prompt.
+if [ "$ALLOW_RICH_TASK_FILE" != "true" ]; then
+    if grep -Eiq 'Expected Answer|Scoring Rubric|Why This Is a Good Benchmark|Difficulty Rating|Key Files' "$TASK_FILE"; then
+        log_error "Task file appears to contain rubric/answer sections."
+        log_error "Use a prompt-only task file, and pass rubric via --answer-key."
+        log_error "Override with --allow-rich-task-file (unsafe)."
+        exit 1
+    fi
+fi
+
 # Check dependencies
 require_command "jq" "brew install jq"
 require_command "claude" "See https://docs.anthropic.com/en/docs/claude-code"
@@ -241,7 +262,14 @@ require_command "claude" "See https://docs.anthropic.com/en/docs/claude-code"
 # ─── Setup ───────────────────────────────────────────────────────────────────────
 
 TASK_NAME=$(basename "$TASK_FILE" .md)
+if [ -n "$TASK_NAME_OVERRIDE" ]; then
+    TASK_NAME="$TASK_NAME_OVERRIDE"
+fi
+
 RESULTS_DIR="$SCRIPT_DIR/results"
+if [ -n "$RESULTS_DIR_OVERRIDE" ]; then
+    RESULTS_DIR="$RESULTS_DIR_OVERRIDE"
+fi
 ensure_dir "$RESULTS_DIR"
 
 TASK_CONTENT=$(cat "$TASK_FILE")
@@ -280,41 +308,6 @@ Start by reading these files before exploring the codebase:
 - agents-content.md
 - doc-structure.md
 "
-elif [ "$CONDITION" = "targeted" ]; then
-    log_info "Building targeted scaffolding..."
-
-    # Source the targeted scaffolding orchestrator
-    . "$REPO_UNDERSTAND_DIR/lib/targeted-scaffolding.sh"
-
-    # Create dedicated temp directory for targeted scaffolding
-    TARGETED_TMP=$(mktemp -d "${TMPDIR:-/tmp}/benchmark-targeted-XXXXXX")
-    cleanup_targeted() {
-        [ -n "${TARGETED_TMP:-}" ] && rm -rf "$TARGETED_TMP"
-    }
-    trap cleanup_targeted EXIT
-
-    # Build targeted scaffolding payload
-    build_targeted_scaffolding "$REPO_PATH" "$TASK_CONTENT" "$TARGETED_TMP"
-
-    # Read payload into variable
-    if [ -f "$TARGETED_TMP/targeted_payload.txt" ] && [ -s "$TARGETED_TMP/targeted_payload.txt" ]; then
-        SCAFFOLD_HINT="
-
-$(cat "$TARGETED_TMP/targeted_payload.txt")
-"
-    else
-        log_warn "Targeted scaffolding produced empty payload, continuing without scaffolding"
-    fi
-
-    # Read file count for results (only files actually injected into payload)
-    if [ -f "$TARGETED_TMP/included_file_list.txt" ]; then
-        SCAFFOLDING_FILE_COUNT=$(wc -l < "$TARGETED_TMP/included_file_list.txt" | tr -d ' ')
-    elif [ -f "$TARGETED_TMP/file_list.txt" ]; then
-        # Backward-compatible fallback
-        SCAFFOLDING_FILE_COUNT=$(wc -l < "$TARGETED_TMP/file_list.txt" | tr -d ' ')
-    else
-        SCAFFOLDING_FILE_COUNT=0
-    fi
 fi
 
 # Build the agent prompt
@@ -330,9 +323,15 @@ thoroughly. Provide a complete, well-structured answer."
 
 START_TIME=$(date +%s)
 RESULT_FILE="$RESULTS_DIR/$(date +%Y%m%d_%H%M%S)_${TASK_NAME}_${CONDITION}.json"
+PROMPT_AUDIT_FILE="$RESULTS_DIR/$(date +%Y%m%d_%H%M%S)_${TASK_NAME}_${CONDITION}_prompt.txt"
 
 log_info "Executing benchmark: $TASK_NAME ($CONDITION scaffolding)"
 log_info "Model: $MODEL | Budget cap: \$$MAX_BUDGET"
+
+# Save exact prompt for auditability — verify no answer-key leakage
+printf '%s\n' "$AGENT_PROMPT" > "$PROMPT_AUDIT_FILE"
+chmod 400 "$PROMPT_AUDIT_FILE"
+log_info "Agent prompt saved for audit: $PROMPT_AUDIT_FILE"
 
 RESPONSE_FILE=$(mktemp "${TMPDIR:-/tmp}/benchmark-response-XXXXXX")
 
@@ -350,7 +349,6 @@ CLAUDECODE='' claude \
     if [ "$CLEANUP_SCAFFOLD" = "true" ]; then
         _cleanup_scaffolding "$REPO_PATH"
     fi
-    [ -n "${TARGETED_TMP:-}" ] && rm -rf "$TARGETED_TMP"
     exit 1
 }
 
@@ -435,5 +433,5 @@ if [ "$AUTO_JUDGE" = "true" ]; then
 else
     echo ""
     echo "To judge accuracy:"
-    echo "  $(basename "$0") $REPO_PATH $TASK_FILE --judge $RESULT_FILE"
+    echo "  $(basename "$0") $REPO_PATH $TASK_FILE --judge $RESULT_FILE --answer-key <rubric-file>"
 fi
