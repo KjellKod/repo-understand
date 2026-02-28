@@ -11,7 +11,7 @@ It does not need to live inside the repo being analyzed.
 
 #### Clone and run
 ```bash
-git clone https://github.com/KjellKod/repo-understand.git
+git clone git@github.com:KjellKod/repo-understand.git
 ```
 #### run it 
 ```
