@@ -8,9 +8,13 @@ understand and navigate the codebase.
 This script is a **standalone tool** that you point at a target repository.
 It does not need to live inside the repo being analyzed.
 
+
+#### Clone and run
 ```bash
-# Clone and run
 git clone https://github.com/KjellKod/repo-understand.git
+```
+#### run it 
+```
 ./repo-understand/repo-understand.sh /path/to/target/repo
 ```
 
