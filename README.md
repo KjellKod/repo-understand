@@ -1,5 +1,5 @@
 # Fun experiment but not recommended. 
-1. our LLM models are so powerful that they "will" figure it out. 
+Our LLM models are so powerful that they "will" figure it out. 
 - on very, very tough problems this tool will drastically cut down token use and time for resolution. 
 - on the **absolute majority** of code-understand challenges, this tool is makign the LLMs less efficient. 
 
