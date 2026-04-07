@@ -1,3 +1,13 @@
+# Fun experiment but not recommended. 
+1. our LLM models are so powerful that they "will" figure it out. 
+- on very, very tough problems this tool will drastically cut down token use and time for resolution. 
+- on the **absolute majority** of code-understand challenges, this tool is makign the LLMs less efficient. 
+
+For this reason I am abandoning this hackathon test tool. It was interesting to see if codebase scaffholding and understanding makes as difference and how. The answer is that it "does" but it's in general is better to let the models figure it out for themselves in say up to 1 million lines of code big repos. (just help them with structured approach). 
+
+At this point honestly, I don't remember if it was branch 0.0.3 or main that was the best version of this. I think one of them was good and the other one was 💩. Either way, I have it available now in case some random discovers it and have been thinking along the same ways. 
+
+
 # repo-understand
 
 Analyze any git repository and generate documentation that helps AI agents
