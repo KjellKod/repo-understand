@@ -2,8 +2,8 @@
 # Benchmark harness for repo-understand
 # Measures time, tokens, and accuracy for agent tasks with/without scaffolding
 #
-# Usage: benchmark.sh <repo-path> <task-file> [--with-scaffolding | --without-scaffolding]
-#        benchmark.sh <repo-path> <task-file> --judge <result-file> [--answer-key <file>]
+# Usage: benchmark.sh <repo-path> <task-prompt-file> [--with-scaffolding | --without-scaffolding]
+#        benchmark.sh <repo-path> <task-prompt-file> --judge <result-file> [--answer-key <file>]
 #
 # Bash 3.2 compatible. Requires: jq, claude CLI
 #
@@ -141,23 +141,26 @@ Score the response using the rubric in the task above. Return ONLY a JSON object
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") <repo-path> <task-file> [options]
+Usage: $(basename "$0") <repo-path> <task-prompt-file> [options]
 
 Benchmark AI agent performance on a task with or without scaffolding.
 
 Modes:
-  --with-scaffolding     Run agent with generated scaffolding (default)
-  --without-scaffolding  Run agent without scaffolding (baseline)
-  --judge <result-file>  Score a previous result for accuracy
+  --with-scaffolding            Run agent with generated scaffolding (default)
+  --without-scaffolding         Run agent without scaffolding (baseline)
+  --judge <result-file>         Score a previous result for accuracy
 
 Arguments:
   <repo-path>            Path to the repository to analyze
-  <task-file>            Path to the benchmark task markdown file
+  <task-prompt-file>     Prompt-only task file sent to the agent
 
 Options:
-  --answer-key <file>    Answer key for judge scoring (optional)
-  --model <model>        Model to use (default: sonnet)
-  --max-budget <usd>     Max spend per run in USD (default: 0.50)
+  --answer-key <file>    Full explanation/rubric for judge scoring (never sent to benchmark agent)
+  --allow-rich-task-file Allow task file to include rubric/answer sections (unsafe; default is blocked)
+  --results-dir <dir>    Directory for benchmark JSON output (default: benchmark/results)
+  --task-name <name>     Override task name in result metadata/file naming
+  --model <model>        Model to use (default: opus)
+  --max-budget <usd>     Max spend per run in USD (default: 5.00)
   --no-judge             Skip automatic judge scoring after benchmark
 
 Requires: jq, claude CLI
@@ -171,9 +174,12 @@ CONDITION="with"
 MODE="benchmark"
 JUDGE_RESULT_FILE=""
 ANSWER_KEY_FILE=""
-MODEL="sonnet"
-MAX_BUDGET="0.50"
+MODEL="opus"
+MAX_BUDGET="5.00"
 AUTO_JUDGE="true"
+ALLOW_RICH_TASK_FILE="false"
+RESULTS_DIR_OVERRIDE=""
+TASK_NAME_OVERRIDE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -201,6 +207,17 @@ while [ $# -gt 0 ]; do
             MAX_BUDGET="$1"
             ;;
         --no-judge) AUTO_JUDGE="false" ;;
+        --allow-rich-task-file) ALLOW_RICH_TASK_FILE="true" ;;
+        --results-dir)
+            shift
+            [ $# -eq 0 ] && { log_error "--results-dir requires a path"; usage; }
+            RESULTS_DIR_OVERRIDE="$1"
+            ;;
+        --task-name)
+            shift
+            [ $# -eq 0 ] && { log_error "--task-name requires a value"; usage; }
+            TASK_NAME_OVERRIDE="$1"
+            ;;
         --help|-h) usage ;;
         -*)
             log_error "Unknown option: $1"
@@ -227,6 +244,17 @@ done
 REPO_PATH="$(cd "$REPO_PATH" 2>/dev/null && pwd)" || { log_error "Invalid repo path"; exit 1; }
 [ -f "$TASK_FILE" ] || { log_error "Task file not found: $TASK_FILE"; exit 1; }
 
+# Guardrail: by default, reject task files that include expected-answer/rubric
+# sections to avoid benchmark leakage into the agent prompt.
+if [ "$ALLOW_RICH_TASK_FILE" != "true" ]; then
+    if grep -Eiq 'Expected Answer|Scoring Rubric|Why This Is a Good Benchmark|Difficulty Rating|Key Files' "$TASK_FILE"; then
+        log_error "Task file appears to contain rubric/answer sections."
+        log_error "Use a prompt-only task file, and pass rubric via --answer-key."
+        log_error "Override with --allow-rich-task-file (unsafe)."
+        exit 1
+    fi
+fi
+
 # Check dependencies
 require_command "jq" "brew install jq"
 require_command "claude" "See https://docs.anthropic.com/en/docs/claude-code"
@@ -234,7 +262,14 @@ require_command "claude" "See https://docs.anthropic.com/en/docs/claude-code"
 # ─── Setup ───────────────────────────────────────────────────────────────────────
 
 TASK_NAME=$(basename "$TASK_FILE" .md)
+if [ -n "$TASK_NAME_OVERRIDE" ]; then
+    TASK_NAME="$TASK_NAME_OVERRIDE"
+fi
+
 RESULTS_DIR="$SCRIPT_DIR/results"
+if [ -n "$RESULTS_DIR_OVERRIDE" ]; then
+    RESULTS_DIR="$RESULTS_DIR_OVERRIDE"
+fi
 ensure_dir "$RESULTS_DIR"
 
 TASK_CONTENT=$(cat "$TASK_FILE")
@@ -288,9 +323,15 @@ thoroughly. Provide a complete, well-structured answer."
 
 START_TIME=$(date +%s)
 RESULT_FILE="$RESULTS_DIR/$(date +%Y%m%d_%H%M%S)_${TASK_NAME}_${CONDITION}.json"
+PROMPT_AUDIT_FILE="$RESULTS_DIR/$(date +%Y%m%d_%H%M%S)_${TASK_NAME}_${CONDITION}_prompt.txt"
 
 log_info "Executing benchmark: $TASK_NAME ($CONDITION scaffolding)"
 log_info "Model: $MODEL | Budget cap: \$$MAX_BUDGET"
+
+# Save exact prompt for auditability — verify no answer-key leakage
+printf '%s\n' "$AGENT_PROMPT" > "$PROMPT_AUDIT_FILE"
+chmod 400 "$PROMPT_AUDIT_FILE"
+log_info "Agent prompt saved for audit: $PROMPT_AUDIT_FILE"
 
 RESPONSE_FILE=$(mktemp "${TMPDIR:-/tmp}/benchmark-response-XXXXXX")
 
@@ -318,11 +359,16 @@ DURATION=$((END_TIME - START_TIME))
 RAW_RESPONSE_FILE="$RESULTS_DIR/$(date +%Y%m%d_%H%M%S)_${TASK_NAME}_${CONDITION}_raw.json"
 cp "$RESPONSE_FILE" "$RAW_RESPONSE_FILE"
 
-# Extract metrics — try multiple JSON paths for compatibility
-INPUT_TOKENS=$(jq -r '(.usage.input_tokens // .input_tokens // .session_usage.input_tokens // 0)' "$RESPONSE_FILE")
-OUTPUT_TOKENS=$(jq -r '(.usage.output_tokens // .output_tokens // .session_usage.output_tokens // 0)' "$RESPONSE_FILE")
-RESPONSE_TEXT=$(jq -r '(.result // .content // .message // "no response")' "$RESPONSE_FILE")
-NUM_TURNS=$(jq -r '(.num_turns // .turns // 0)' "$RESPONSE_FILE")
+# Extract metrics from Claude CLI JSON output
+# input_tokens only counts non-cached tokens; include cached tokens for real total
+INPUT_TOKENS=$(jq -r '[.usage.input_tokens // 0, .usage.cache_creation_input_tokens // 0, .usage.cache_read_input_tokens // 0] | add' "$RESPONSE_FILE")
+OUTPUT_TOKENS=$(jq -r '(.usage.output_tokens // 0)' "$RESPONSE_FILE")
+RESPONSE_TEXT=$(jq -r '(.result // "")' "$RESPONSE_FILE")
+NUM_TURNS=$(jq -r '(.num_turns // 0)' "$RESPONSE_FILE")
+COST_USD=$(jq -r '(.total_cost_usd // 0)' "$RESPONSE_FILE")
+SUBTYPE=$(jq -r '(.subtype // "unknown")' "$RESPONSE_FILE")
+
+# Just informational — no stopping on budget. Let judge handle incomplete responses.
 rm -f "$RESPONSE_FILE"
 
 log_info "Raw response saved: $RAW_RESPONSE_FILE"
@@ -339,23 +385,29 @@ jq -n \
     --arg condition "$CONDITION" \
     --arg repo "$REPO_PATH" \
     --arg model "$MODEL" \
+    --arg status "$SUBTYPE" \
     --arg timestamp "$(iso_timestamp)" \
     --argjson input_tokens "$INPUT_TOKENS" \
     --argjson output_tokens "$OUTPUT_TOKENS" \
     --argjson duration_seconds "$DURATION" \
     --argjson num_turns "$NUM_TURNS" \
+    --argjson cost_usd "$COST_USD" \
+    --argjson scaffolding_file_count "${SCAFFOLDING_FILE_COUNT:-0}" \
     --arg response "$RESPONSE_TEXT" \
     '{
         task: $task,
         condition: $condition,
         repo: $repo,
         model: $model,
+        status: $status,
         timestamp: $timestamp,
         input_tokens: $input_tokens,
         output_tokens: $output_tokens,
         total_tokens: ($input_tokens + $output_tokens),
         duration_seconds: $duration_seconds,
         num_turns: $num_turns,
+        cost_usd: $cost_usd,
+        scaffolding_file_count: $scaffolding_file_count,
         response: $response
     }' > "$RESULT_FILE"
 
@@ -365,10 +417,12 @@ echo "Results:"
 echo "  Task:          $TASK_NAME"
 echo "  Condition:     $CONDITION scaffolding"
 echo "  Model:         $MODEL"
-echo "  Input tokens:  $INPUT_TOKENS"
+echo "  Status:        $SUBTYPE"
+echo "  Input tokens:  $INPUT_TOKENS (including cached)"
 echo "  Output tokens: $OUTPUT_TOKENS"
 echo "  Total tokens:  $((INPUT_TOKENS + OUTPUT_TOKENS))"
 echo "  Agent turns:   $NUM_TURNS"
+echo "  Cost:          \$$COST_USD"
 echo "  Duration:      ${DURATION}s"
 echo "  Saved to:      $RESULT_FILE"
 
@@ -379,5 +433,5 @@ if [ "$AUTO_JUDGE" = "true" ]; then
 else
     echo ""
     echo "To judge accuracy:"
-    echo "  $(basename "$0") $REPO_PATH $TASK_FILE --judge $RESULT_FILE"
+    echo "  $(basename "$0") $REPO_PATH $TASK_FILE --judge $RESULT_FILE --answer-key <rubric-file>"
 fi
